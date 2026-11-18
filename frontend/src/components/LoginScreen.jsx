@@ -68,8 +68,8 @@ export default function LoginScreen() {
               data-testid="login-username-input"
               value={username}
               onChange={(e) => setUsername(e.target.value)}
-              placeholder="donas"
-              autoComplete="username"
+              placeholder="Digite seu usuário"
+              autoComplete="off"
               className="mt-2 w-full h-12 rounded-xl border border-white/10 bg-white/5 text-white px-4 text-sm font-medium outline-none focus:ring-2 focus:ring-amber-400/70 focus:border-transparent placeholder:text-white/30 transition-shadow"
             />
           </div>
