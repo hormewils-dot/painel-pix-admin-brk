@@ -1,7 +1,7 @@
-import asyncio
 import os
-import random
+import re
 import logging
+import unicodedata
 from contextlib import suppress
 from pathlib import Path
 from datetime import datetime, timezone, timedelta
@@ -11,8 +11,8 @@ from dotenv import load_dotenv
 from starlette.middleware.cors import CORSMiddleware
 from motor.motor_asyncio import AsyncIOMotorClient
 from pymongo import ASCENDING, DESCENDING, IndexModel
-from pydantic import BaseModel, Field
-from typing import Optional
+from pydantic import BaseModel
+from typing import Optional, List
 import bcrypt
 import jwt
 import uuid
@@ -85,6 +85,8 @@ class SettingsInput(BaseModel):
     tipo_chave: str = "aleatoria"
     nome_beneficiario: str = ""
     cidade: str = ""
+    valor_padrao: float = 0.0
+    valores_por_cidade: List[dict] = []
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
     notificacoes_ativas: bool = False
@@ -92,23 +94,23 @@ class SettingsInput(BaseModel):
     notify_pix_copiado: bool = True
     notify_acesso: bool = False
 
+
+class ConsultaInput(BaseModel):
+    documento: str
+    cidade: str = ""
+
+
+class AcessoInput(BaseModel):
+    page: str = "home"
+    cidade: str = ""
+
+
+class PixCopiadoInput(BaseModel):
+    id: str
+
 # ---------------------------------------------------------------------------
-# Simulation data pools
+# Helpers
 # ---------------------------------------------------------------------------
-
-VALORES = [78.70, 89.40, 129.90, 159.20, 199.20, 219.80, 249.90, 312.40, 98.60, 145.30]
-CIDADES = [
-    "Porto Alegre/RS", "Florianópolis/SC", "Curitiba/PR", "São Paulo/SP", "Rio de Janeiro/RJ",
-    "Jaraguá do Sul/SC", "Tubarão/SC", "Ariquemes/RO", "Santana do Livramento/RS", "Belo Horizonte/MG",
-    "Salvador/BA", "Recife/PE", "Fortaleza/CE", "Goiânia/GO", "Campinas/SP",
-]
-DEVICES = ["mobile", "desktop"]
-NAVEGADORES = ["Chrome", "Safari", "Firefox", "Edge"]
-
-
-def gen_documento() -> str:
-    return "".join(str(random.randint(0, 9)) for _ in range(11))
-
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat()
@@ -118,90 +120,92 @@ def start_of_today_utc() -> datetime:
     n = datetime.now(timezone.utc)
     return n.replace(hour=0, minute=0, second=0, microsecond=0)
 
+
+def strip_accents(text: str) -> str:
+    nfkd = unicodedata.normalize("NFKD", text or "")
+    return "".join(c for c in nfkd if not unicodedata.combining(c))
+
+
+def parse_device(ua: str) -> str:
+    ua = ua or ""
+    return "mobile" if any(k in ua for k in ("Mobile", "Android", "iPhone", "iPad")) else "desktop"
+
+
+def parse_browser(ua: str) -> str:
+    ua = ua or ""
+    for name, key in [("Edge", "Edg"), ("Chrome", "Chrome"), ("Firefox", "Firefox"), ("Safari", "Safari")]:
+        if key in ua:
+            return name
+    return "Outro"
+
 # ---------------------------------------------------------------------------
-# Seed + simulator
+# PIX BR Code (EMV) generator — static PIX with amount, payable by any bank app
 # ---------------------------------------------------------------------------
 
-async def seed_admin():
-    username = os.environ.get("ADMIN_USERNAME", "donas")
-    password = os.environ.get("ADMIN_PASSWORD", "Seinao10@@")
-    existing = await db.users.find_one({"username": username})
-    if existing is None:
-        await db.users.insert_one({
-            "username": username,
-            "password_hash": hash_password(password),
-            "email": os.environ.get("ADMIN_EMAIL", ""),
-            "role": "admin",
-            "created_at": now_iso(),
-        })
-        logger.info("Admin '%s' criado.", username)
+def _emv(tag: str, value: str) -> str:
+    return f"{tag}{len(value):02d}{value}"
 
 
-async def seed_sample_data():
-    if await db.faturas.count_documents({}) > 0:
-        return
-    now = datetime.now(timezone.utc)
-    faturas = []
-    # distribute across last 7 days, weighted toward recent
-    for day_offset in range(6, -1, -1):
-        day = now - timedelta(days=day_offset)
-        count = random.randint(4, 14) if day_offset <= 2 else random.randint(1, 6)
-        for _ in range(count):
-            ts = day.replace(hour=random.randint(8, 22), minute=random.randint(0, 59), second=random.randint(0, 59))
-            valor = random.choice(VALORES)
-            qr_copiado = random.random() < 0.3
-            pix_copiado = random.random() < 0.25
-            status = "pago" if pix_copiado and random.random() < 0.6 else random.choice(["pendente", "pendente", "expirado"])
-            if pix_copiado and status != "expirado":
-                status = "pago"
-            faturas.append({
-                "id": str(uuid.uuid4()),
-                "documento": gen_documento(),
-                "valor": valor,
-                "status": status,
-                "qr_copiado": qr_copiado,
-                "pix_copiado": pix_copiado,
-                "cidade": random.choice(CIDADES),
-                "device": random.choice(DEVICES),
-                "navegador": random.choice(NAVEGADORES),
-                "created_at": ts.isoformat(),
-            })
-    await db.faturas.insert_many(faturas)
+def _crc16(payload: str) -> int:
+    crc = 0xFFFF
+    for byte in payload.encode("utf-8"):
+        crc ^= byte << 8
+        for _ in range(8):
+            if crc & 0x8000:
+                crc = (crc << 1) ^ 0x1021
+            else:
+                crc <<= 1
+            crc &= 0xFFFF
+    return crc
 
-    # counters for clicks
-    await db.counters.update_one(
-        {"_id": "main"},
-        {"$set": {
-            "clicks_home_total": random.randint(300, 420),
-            "clicks_faturas_total": random.randint(260, 360),
-            "clicks_home_today": random.randint(120, 260),
-            "clicks_faturas_today": random.randint(100, 230),
-            "today_date": start_of_today_utc().date().isoformat(),
-        }},
-        upsert=True,
+
+def gen_pix_brcode(chave: str, nome: str, cidade: str, valor: float, txid: str) -> str:
+    nome = (strip_accents(nome) or "BRK FATURAS").upper()[:25]
+    cidade = (strip_accents(cidade) or "SAO PAULO").upper()[:15]
+    txid = re.sub(r"[^A-Za-z0-9]", "", txid or "")[:25] or "***"
+
+    maai = _emv("00", "br.gov.bcb.pix") + _emv("01", chave.strip())
+    payload = (
+        _emv("00", "01")
+        + _emv("01", "11")
+        + _emv("26", maai)
+        + _emv("52", "0000")
+        + _emv("53", "986")
+        + _emv("54", f"{valor:.2f}")
+        + _emv("58", "BR")
+        + _emv("59", nome)
+        + _emv("60", cidade)
+        + _emv("62", _emv("05", txid))
     )
+    payload += "6304"
+    return payload + f"{_crc16(payload):04X}"
 
-    # seed recent activity feed
-    acts = []
-    for fat in sorted(faturas, key=lambda f: f["created_at"], reverse=True)[:30]:
-        acts.append({
-            "id": str(uuid.uuid4()),
-            "type": "pix_gerado",
-            "title": f"PIX gerado · Doc {fat['documento']}",
-            "subtitle": fat["cidade"],
-            "valor": fat["valor"],
-            "documento": fat["documento"],
-            "device": fat["device"],
-            "created_at": fat["created_at"],
-        })
-    await db.activities.insert_many(acts)
-    logger.info("Dados de exemplo gerados: %d faturas.", len(faturas))
 
+def compute_valor_cidade(s: dict, cidade: str) -> float:
+    vmap = {}
+    for item in (s.get("valores_por_cidade") or []):
+        c = strip_accents((item.get("cidade") or "")).strip().lower()
+        if c:
+            try:
+                vmap[c] = float(item.get("valor") or 0)
+            except (TypeError, ValueError):
+                pass
+    key = strip_accents(cidade or "").strip().lower()
+    if key and key in vmap:
+        return vmap[key]
+    try:
+        return float(s.get("valor_padrao") or 0)
+    except (TypeError, ValueError):
+        return 0.0
+
+# ---------------------------------------------------------------------------
+# Activity / counters
+# ---------------------------------------------------------------------------
 
 async def trim_activities():
     total = await db.activities.count_documents({})
-    if total > 300:
-        olds = await db.activities.find({}, {"_id": 1}).sort("created_at", ASCENDING).limit(total - 300).to_list(total - 300)
+    if total > 500:
+        olds = await db.activities.find({}, {"_id": 1}).sort("created_at", ASCENDING).limit(total - 500).to_list(total - 500)
         await db.activities.delete_many({"_id": {"$in": [o["_id"] for o in olds]}})
 
 
@@ -220,56 +224,51 @@ async def add_activity(doc: dict):
     doc["id"] = str(uuid.uuid4())
     doc["created_at"] = now_iso()
     await db.activities.insert_one(doc)
+    await trim_activities()
 
 
-async def pick_recent_fatura(cond: dict):
-    rows = await db.faturas.find(cond).sort("created_at", DESCENDING).limit(20).to_list(20)
-    return random.choice(rows) if rows else None
+async def notify_telegram(event_type: str, text: str):
+    """Fire a Telegram message if notifications are enabled for this event type."""
+    s = await db.settings.find_one({"_id": "main"}) or {}
+    if not s.get("notificacoes_ativas"):
+        return
+    flag = {
+        "pix_gerado": "notify_pix_gerado",
+        "pix_copiado": "notify_pix_copiado",
+        "acesso": "notify_acesso",
+    }.get(event_type)
+    if flag and not s.get(flag, False):
+        return
+    token = (s.get("telegram_bot_token") or "").strip()
+    chat_id = (s.get("telegram_chat_id") or "").strip()
+    if not token or not chat_id:
+        return
+    try:
+        requests.post(
+            f"https://api.telegram.org/bot{token}/sendMessage",
+            json={"chat_id": chat_id, "text": text, "parse_mode": "HTML"},
+            timeout=8,
+        )
+    except requests.RequestException as exc:
+        logger.warning("Telegram falhou: %s", exc)
 
+# ---------------------------------------------------------------------------
+# Seed admin
+# ---------------------------------------------------------------------------
 
-async def simulate_loop():
-    await asyncio.sleep(3)
-    while True:
-        try:
-            await asyncio.sleep(random.uniform(1.5, 2.0))
-            r = random.random()
-            if r < 0.42:
-                valor = random.choice(VALORES)
-                doc = gen_documento()
-                fat = {
-                    "id": str(uuid.uuid4()), "documento": doc, "valor": valor, "status": "pendente",
-                    "qr_copiado": False, "pix_copiado": False, "cidade": random.choice(CIDADES),
-                    "device": random.choice(DEVICES), "navegador": random.choice(NAVEGADORES),
-                    "created_at": now_iso(),
-                }
-                await db.faturas.insert_one(fat)
-                await add_activity({"type": "pix_gerado", "title": f"PIX gerado · Doc {doc}", "subtitle": fat["cidade"], "valor": valor, "documento": doc, "device": fat["device"]})
-            elif r < 0.56:
-                fat = await pick_recent_fatura({"qr_copiado": False})
-                if fat:
-                    await db.faturas.update_one({"id": fat["id"]}, {"$set": {"qr_copiado": True}})
-                    await add_activity({"type": "qr_copiado", "title": f"QR Code copiado · Doc {fat['documento']}", "subtitle": fat["cidade"], "valor": fat["valor"], "documento": fat["documento"], "device": fat.get("device")})
-            elif r < 0.72:
-                fat = await pick_recent_fatura({"pix_copiado": False})
-                if fat:
-                    pago = random.random() < 0.55
-                    upd = {"pix_copiado": True}
-                    if pago:
-                        upd["status"] = "pago"
-                    await db.faturas.update_one({"id": fat["id"]}, {"$set": upd})
-                    await add_activity({"type": "pix_copiado", "title": f"PIX copiado · Doc {fat['documento']}", "subtitle": fat["cidade"], "valor": fat["valor"], "documento": fat["documento"], "device": fat.get("device")})
-            elif r < 0.88:
-                await bump_click("home")
-                await add_activity({"type": "acesso_home", "title": "Novo acesso · Página inicial", "subtitle": random.choice(CIDADES), "device": random.choice(DEVICES)})
-            else:
-                await bump_click("faturas")
-                await add_activity({"type": "acesso_faturas", "title": "Novo acesso · Página de faturas", "subtitle": random.choice(CIDADES), "device": random.choice(DEVICES)})
-            await trim_activities()
-        except asyncio.CancelledError:
-            raise
-        except Exception as exc:
-            logger.error("simulate_loop: %s", exc)
-            await asyncio.sleep(2)
+async def seed_admin():
+    username = os.environ.get("ADMIN_USERNAME", "donas")
+    password = os.environ.get("ADMIN_PASSWORD", "")
+    existing = await db.users.find_one({"username": username})
+    if existing is None and password:
+        await db.users.insert_one({
+            "username": username,
+            "password_hash": hash_password(password),
+            "email": os.environ.get("ADMIN_EMAIL", ""),
+            "role": "admin",
+            "created_at": now_iso(),
+        })
+        logger.info("Admin '%s' criado.", username)
 
 # ---------------------------------------------------------------------------
 # App
@@ -281,8 +280,10 @@ api = APIRouter(prefix="/api")
 
 @api.get("/")
 async def root():
-    return {"message": "BRK Painel API"}
+    return {"message": "BRK Faturas API"}
 
+
+# ------------------------------- Auth --------------------------------------
 
 @api.post("/auth/login")
 async def login(data: LoginInput):
@@ -297,6 +298,109 @@ async def login(data: LoginInput):
 async def me(current=Depends(get_current_user)):
     return current
 
+
+# ------------------------------ Public -------------------------------------
+
+@api.get("/public/info")
+async def public_info():
+    s = await db.settings.find_one({"_id": "main"}) or {}
+    cidades = []
+    for item in (s.get("valores_por_cidade") or []):
+        c = (item.get("cidade") or "").strip()
+        if c:
+            try:
+                cidades.append({"cidade": c, "valor": float(item.get("valor") or 0)})
+            except (TypeError, ValueError):
+                pass
+    return {
+        "beneficiario": s.get("nome_beneficiario") or "",
+        "pagamento_disponivel": bool((s.get("chave_pix") or "").strip()),
+        "valor_padrao": float(s.get("valor_padrao") or 0),
+        "cidades": cidades,
+    }
+
+
+@api.post("/public/acesso")
+async def public_acesso(data: AcessoInput, request: Request):
+    page = data.page if data.page in ("home", "faturas") else "home"
+    await bump_click(page)
+    ua = request.headers.get("user-agent", "")
+    label = "Página inicial" if page == "home" else "Página de faturas"
+    await add_activity({
+        "type": f"acesso_{page}",
+        "title": f"Novo acesso · {label}",
+        "subtitle": data.cidade or "Site público",
+        "device": parse_device(ua),
+    })
+    await notify_telegram("acesso", f"👀 Novo acesso ao site · {label}")
+    return {"ok": True}
+
+
+@api.post("/public/consulta")
+async def public_consulta(data: ConsultaInput, request: Request):
+    s = await db.settings.find_one({"_id": "main"}) or {}
+    chave = (s.get("chave_pix") or "").strip()
+    if not chave:
+        raise HTTPException(status_code=503, detail="Pagamento indisponível no momento. Tente mais tarde.")
+
+    documento = re.sub(r"\D", "", data.documento or "")
+    if len(documento) < 11:
+        raise HTTPException(status_code=400, detail="Informe um CPF válido (11 dígitos).")
+    documento = documento[:11]
+
+    valor = compute_valor_cidade(s, data.cidade)
+    if valor <= 0:
+        raise HTTPException(status_code=400, detail="Nenhum débito disponível para esta cidade.")
+
+    ua = request.headers.get("user-agent", "")
+    pix_code = gen_pix_brcode(chave, s.get("nome_beneficiario", ""), s.get("cidade", ""), valor, documento)
+    fat = {
+        "id": str(uuid.uuid4()),
+        "documento": documento,
+        "valor": round(valor, 2),
+        "status": "pendente",
+        "qr_copiado": False,
+        "pix_copiado": False,
+        "cidade": data.cidade or "",
+        "device": parse_device(ua),
+        "navegador": parse_browser(ua),
+        "pix_code": pix_code,
+        "origem": "site_publico",
+        "created_at": now_iso(),
+    }
+    await db.faturas.insert_one(fat)
+    await add_activity({
+        "type": "pix_gerado",
+        "title": f"PIX gerado · Doc {documento}",
+        "subtitle": data.cidade or "Site público",
+        "valor": fat["valor"],
+        "documento": documento,
+        "device": fat["device"],
+    })
+    await notify_telegram("pix_gerado", f"🧾 <b>PIX gerado</b>\nDoc: {documento}\nValor: R$ {fat['valor']:.2f}\nCidade: {data.cidade or '-'}")
+    return {"fatura": {k: v for k, v in fat.items() if k != "_id"}, "pix_code": pix_code}
+
+
+@api.post("/public/pix-copiado")
+async def public_pix_copiado(data: PixCopiadoInput):
+    fat = await db.faturas.find_one({"id": data.id})
+    if not fat:
+        raise HTTPException(status_code=404, detail="Fatura não encontrada")
+    if not fat.get("pix_copiado"):
+        await db.faturas.update_one({"id": data.id}, {"$set": {"pix_copiado": True}})
+        await add_activity({
+            "type": "pix_copiado",
+            "title": f"PIX copiado · Doc {fat['documento']}",
+            "subtitle": fat.get("cidade") or "Site público",
+            "valor": fat.get("valor"),
+            "documento": fat["documento"],
+            "device": fat.get("device"),
+        })
+        await notify_telegram("pix_copiado", f"✅ <b>PIX copiado</b>\nDoc: {fat['documento']}\nValor: R$ {float(fat.get('valor') or 0):.2f}")
+    return {"ok": True}
+
+
+# ----------------------------- Dashboard -----------------------------------
 
 async def compute_stats():
     today = start_of_today_utc().isoformat()
@@ -390,6 +494,8 @@ async def listar_activities(current=Depends(get_current_user), limit: int = Quer
     return {"activities": rows}
 
 
+# ----------------------------- Settings ------------------------------------
+
 @api.get("/settings")
 async def get_settings(current=Depends(get_current_user)):
     doc = await db.settings.find_one({"_id": "main"}, {"_id": 0})
@@ -435,7 +541,7 @@ app.add_middleware(
 
 INDEXES = {
     "users": [IndexModel([("username", ASCENDING)], name="username", unique=True)],
-    "faturas": [IndexModel([("created_at", DESCENDING)], name="created_at_desc"), IndexModel([("status", ASCENDING)], name="status")],
+    "faturas": [IndexModel([("created_at", DESCENDING)], name="created_at_desc"), IndexModel([("status", ASCENDING)], name="status"), IndexModel([("id", ASCENDING)], name="fatura_id")],
     "activities": [IndexModel([("created_at", DESCENDING)], name="created_at_desc")],
 }
 
@@ -451,13 +557,8 @@ async def ensure_indexes():
 async def startup():
     await ensure_indexes()
     await seed_admin()
-    await seed_sample_data()
-    app.state.sim = asyncio.create_task(simulate_loop())
 
 
 @app.on_event("shutdown")
 async def shutdown():
-    app.state.sim.cancel()
-    with suppress(asyncio.CancelledError):
-        await app.state.sim
     client.close()

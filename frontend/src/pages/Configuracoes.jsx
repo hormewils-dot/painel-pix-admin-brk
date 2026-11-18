@@ -1,7 +1,7 @@
 import { useEffect, useState } from "react";
 import api from "../lib/api";
 import { toast } from "sonner";
-import { KeyRound, Send, Bell, Save, Loader2, QrCode } from "lucide-react";
+import { KeyRound, Send, Bell, Save, Loader2, QrCode, MapPin, Plus, Trash2 } from "lucide-react";
 import {
   Select, SelectContent, SelectItem, SelectTrigger, SelectValue,
 } from "../components/ui/select";
@@ -12,6 +12,8 @@ const EMPTY = {
   tipo_chave: "aleatoria",
   nome_beneficiario: "",
   cidade: "",
+  valor_padrao: 0,
+  valores_por_cidade: [],
   telegram_bot_token: "",
   telegram_chat_id: "",
   notificacoes_ativas: false,
@@ -33,8 +35,7 @@ const inputCls =
 
 export default function Configuracoes() {
   const [form, setForm] = useState(EMPTY);
-  const [savingPix, setSavingPix] = useState(false);
-  const [savingTg, setSavingTg] = useState(false);
+  const [saving, setSaving] = useState("");
   const [testing, setTesting] = useState(false);
 
   useEffect(() => {
@@ -44,22 +45,21 @@ export default function Configuracoes() {
   const set = (k) => (v) => setForm((f) => ({ ...f, [k]: v }));
 
   const save = async (which) => {
-    which === "pix" ? setSavingPix(true) : setSavingTg(true);
+    setSaving(which);
     try {
-      await api.put("/settings", form);
-      toast.success(which === "pix" ? "Chave PIX salva" : "Configurações do Telegram salvas");
+      await api.put("/settings", { ...form, valor_padrao: Number(form.valor_padrao) || 0 });
+      toast.success("Configurações salvas");
     } catch (e) {
       toast.error("Erro ao salvar", { description: e.response?.data?.detail || e.message });
     } finally {
-      setSavingPix(false);
-      setSavingTg(false);
+      setSaving("");
     }
   };
 
   const testTelegram = async () => {
     setTesting(true);
     try {
-      await api.put("/settings", form);
+      await api.put("/settings", { ...form, valor_padrao: Number(form.valor_padrao) || 0 });
       await api.post("/settings/telegram/test");
       toast.success("Notificação de teste enviada ao grupo!");
     } catch (e) {
@@ -69,11 +69,20 @@ export default function Configuracoes() {
     }
   };
 
+  // city value rows
+  const addCidade = () => setForm((f) => ({ ...f, valores_por_cidade: [...(f.valores_por_cidade || []), { cidade: "", valor: 0 }] }));
+  const updCidade = (i, key, val) =>
+    setForm((f) => ({
+      ...f,
+      valores_por_cidade: f.valores_por_cidade.map((row, idx) => (idx === i ? { ...row, [key]: key === "valor" ? val : val } : row)),
+    }));
+  const delCidade = (i) => setForm((f) => ({ ...f, valores_por_cidade: f.valores_por_cidade.filter((_, idx) => idx !== i) }));
+
   return (
     <div className="space-y-6 max-w-3xl" data-testid="configuracoes-page">
       <div>
         <h1 className="font-display text-3xl font-extrabold tracking-tight">Configurações</h1>
-        <p className="text-muted-foreground text-sm mt-1">Chave PIX e notificações do bot do Telegram.</p>
+        <p className="text-muted-foreground text-sm mt-1">Chave PIX, valores por cidade e notificações do Telegram.</p>
       </div>
 
       {/* PIX */}
@@ -84,7 +93,7 @@ export default function Configuracoes() {
           </span>
           <div>
             <h2 className="font-display text-lg font-semibold">Chave PIX</h2>
-            <p className="text-xs text-muted-foreground">Usada para gerar os pagamentos no site público.</p>
+            <p className="text-xs text-muted-foreground">Usada para gerar o PIX copia-e-cola e o QR Code no site público.</p>
           </div>
         </div>
 
@@ -123,7 +132,7 @@ export default function Configuracoes() {
               className={inputCls}
             />
           </Field>
-          <Field label="Cidade do beneficiário">
+          <Field label="Cidade do beneficiário" hint="Vai no código PIX (máx. 15 caracteres).">
             <input
               data-testid="config-pix-city-input"
               value={form.cidade}
@@ -138,10 +147,91 @@ export default function Configuracoes() {
           <button
             data-testid="config-pix-save-button"
             onClick={() => save("pix")}
-            disabled={savingPix}
+            disabled={saving === "pix"}
             className="h-11 px-5 rounded-xl bg-primary text-primary-foreground font-semibold text-sm inline-flex items-center gap-2 hover:brightness-110 active:scale-[0.99] transition disabled:opacity-60"
           >
-            {savingPix ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} Salvar chave PIX
+            {saving === "pix" ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} Salvar chave PIX
+          </button>
+        </div>
+      </section>
+
+      {/* Valores por cidade */}
+      <section className="rounded-2xl border border-border bg-card p-6 space-y-5">
+        <div className="flex items-center gap-3">
+          <span className="h-10 w-10 grid place-items-center rounded-xl bg-amber-500/10 text-amber-600 dark:text-amber-400">
+            <MapPin size={20} />
+          </span>
+          <div>
+            <h2 className="font-display text-lg font-semibold">Valores por cidade</h2>
+            <p className="text-xs text-muted-foreground">Define o valor do débito mostrado ao visitante conforme a cidade.</p>
+          </div>
+        </div>
+
+        <Field label="Valor padrão (R$)" hint="Usado quando a cidade não está na lista abaixo.">
+          <input
+            data-testid="config-valor-padrao-input"
+            type="number"
+            step="0.01"
+            min="0"
+            value={form.valor_padrao}
+            onChange={(e) => set("valor_padrao")(e.target.value)}
+            placeholder="0,00"
+            className={inputCls + " max-w-[200px] font-mono"}
+          />
+        </Field>
+
+        <div className="space-y-2" data-testid="config-cidades-list">
+          {(form.valores_por_cidade || []).map((row, i) => (
+            <div key={i} className="flex items-center gap-2">
+              <input
+                data-testid={`config-cidade-nome-${i}`}
+                value={row.cidade}
+                onChange={(e) => updCidade(i, "cidade", e.target.value)}
+                placeholder="Cidade (ex: Curitiba/PR)"
+                className={inputCls + " flex-1"}
+              />
+              <div className="relative w-36">
+                <span className="absolute left-3 top-1/2 -translate-y-1/2 text-xs text-muted-foreground">R$</span>
+                <input
+                  data-testid={`config-cidade-valor-${i}`}
+                  type="number"
+                  step="0.01"
+                  min="0"
+                  value={row.valor}
+                  onChange={(e) => updCidade(i, "valor", e.target.value)}
+                  placeholder="0,00"
+                  className={inputCls + " pl-8 font-mono"}
+                />
+              </div>
+              <button
+                data-testid={`config-cidade-remove-${i}`}
+                onClick={() => delCidade(i)}
+                className="h-11 w-11 shrink-0 grid place-items-center rounded-xl border border-border hover:bg-destructive/10 hover:text-destructive transition-colors"
+              >
+                <Trash2 size={16} />
+              </button>
+            </div>
+          ))}
+          {!(form.valores_por_cidade || []).length && (
+            <p className="text-sm text-muted-foreground">Nenhuma cidade adicionada. Será usado o valor padrão.</p>
+          )}
+        </div>
+
+        <div className="flex flex-wrap justify-between gap-3">
+          <button
+            data-testid="config-add-cidade-button"
+            onClick={addCidade}
+            className="h-11 px-4 rounded-xl border border-border bg-background font-medium text-sm inline-flex items-center gap-2 hover:bg-accent transition"
+          >
+            <Plus size={16} /> Adicionar cidade
+          </button>
+          <button
+            data-testid="config-valores-save-button"
+            onClick={() => save("valores")}
+            disabled={saving === "valores"}
+            className="h-11 px-5 rounded-xl bg-primary text-primary-foreground font-semibold text-sm inline-flex items-center gap-2 hover:brightness-110 active:scale-[0.99] transition disabled:opacity-60"
+          >
+            {saving === "valores" ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} Salvar valores
           </button>
         </div>
       </section>
@@ -154,7 +244,7 @@ export default function Configuracoes() {
           </span>
           <div>
             <h2 className="font-display text-lg font-semibold">Notificações do Bot Telegram</h2>
-            <p className="text-xs text-muted-foreground">Receba alertas no grupo a cada evento do site.</p>
+            <p className="text-xs text-muted-foreground">Receba alertas no grupo a cada evento real do site público.</p>
           </div>
         </div>
 
@@ -212,10 +302,10 @@ export default function Configuracoes() {
           <button
             data-testid="config-telegram-save-button"
             onClick={() => save("telegram")}
-            disabled={savingTg}
+            disabled={saving === "telegram"}
             className="h-11 px-5 rounded-xl bg-primary text-primary-foreground font-semibold text-sm inline-flex items-center gap-2 hover:brightness-110 active:scale-[0.99] transition disabled:opacity-60"
           >
-            {savingTg ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} Salvar Telegram
+            {saving === "telegram" ? <Loader2 size={16} className="animate-spin" /> : <Save size={16} />} Salvar Telegram
           </button>
         </div>
       </section>

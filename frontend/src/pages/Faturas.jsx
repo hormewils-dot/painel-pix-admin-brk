@@ -1,5 +1,6 @@
 import { useEffect, useState } from "react";
 import api, { formatBRL, formatDateTime } from "../lib/api";
+import { QRCodeSVG } from "qrcode.react";
 import { toast } from "sonner";
 import { Search, Copy, Eye, QrCode, Smartphone, Monitor } from "lucide-react";
 import {
@@ -16,11 +17,6 @@ const STATUS_CLS = {
 };
 
 const STATUS_LABEL = { pago: "Pago", pendente: "Pendente", expirado: "Expirado" };
-
-const gerarPixCopiaCola = (f) =>
-  `00020126580014BR.GOV.BCB.PIX0136${f.documento}520400005303986540${f.valor
-    .toFixed(2)
-    .replace(".", "")}5802BR5913BRK PAGAMENTOS6009SAO PAULO62070503***6304${f.documento.slice(0, 4)}`;
 
 export default function Faturas() {
   const [faturas, setFaturas] = useState([]);
@@ -48,8 +44,9 @@ export default function Faturas() {
   }, [search, status]);
 
   const copiarPix = async (f) => {
+    if (!f.pix_code) return toast.error("Esta fatura não possui código PIX.");
     try {
-      await navigator.clipboard.writeText(gerarPixCopiaCola(f));
+      await navigator.clipboard.writeText(f.pix_code);
       toast.success("Código PIX copiado", { description: `Documento ${f.documento}` });
     } catch {
       toast.error("Não foi possível copiar");
@@ -62,7 +59,7 @@ export default function Faturas() {
         <div>
           <h1 className="font-display text-3xl font-extrabold tracking-tight">Faturas Geradas</h1>
           <p className="text-muted-foreground text-sm mt-1">
-            {total} fatura{total === 1 ? "" : "s"} registrada{total === 1 ? "" : "s"} pelo site público.
+            {total} fatura{total === 1 ? "" : "s"} gerada{total === 1 ? "" : "s"} no site público.
           </p>
         </div>
       </div>
@@ -112,7 +109,7 @@ export default function Faturas() {
                   <tr key={f.id} data-testid={`fatura-row-${f.documento}`} className="border-b border-border/50 hover:bg-accent/40 transition-colors">
                     <td className="px-4 py-3 font-mono text-xs">{f.documento}</td>
                     <td className="px-4 py-3 font-semibold text-emerald-600 dark:text-emerald-400 whitespace-nowrap">{formatBRL(f.valor)}</td>
-                    <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{f.cidade}</td>
+                    <td className="px-4 py-3 text-muted-foreground whitespace-nowrap">{f.cidade || "-"}</td>
                     <td className="px-4 py-3">
                       <span className="inline-flex items-center gap-1.5 text-muted-foreground capitalize">
                         <Device size={14} /> {f.device}
@@ -154,7 +151,7 @@ export default function Faturas() {
           </table>
         </div>
         {loading && <p className="p-6 text-sm text-muted-foreground">Carregando faturas...</p>}
-        {!loading && !faturas.length && <p className="p-6 text-sm text-muted-foreground">Nenhuma fatura encontrada.</p>}
+        {!loading && !faturas.length && <p className="p-6 text-sm text-muted-foreground">Nenhuma fatura gerada ainda. Elas aparecerão aqui quando alguém gerar um PIX no site público.</p>}
       </div>
 
       {/* Detail modal */}
@@ -166,9 +163,15 @@ export default function Faturas() {
           {selected && (
             <div className="space-y-4">
               <div className="grid place-items-center">
-                <div className="h-40 w-40 rounded-xl border border-border bg-background grid place-items-center">
-                  <QrCode size={110} strokeWidth={1} className="text-foreground" />
-                </div>
+                {selected.pix_code ? (
+                  <div className="p-3 bg-white rounded-xl border border-border">
+                    <QRCodeSVG value={selected.pix_code} size={150} level="M" />
+                  </div>
+                ) : (
+                  <div className="h-40 w-40 rounded-xl border border-border bg-background grid place-items-center">
+                    <QrCode size={110} strokeWidth={1} className="text-muted-foreground" />
+                  </div>
+                )}
                 <p className="text-[11px] text-muted-foreground mt-2">QR Code PIX · Documento {selected.documento}</p>
               </div>
               <dl className="text-sm divide-y divide-border/60 rounded-xl border border-border/60">
@@ -176,7 +179,7 @@ export default function Faturas() {
                   ["Documento", selected.documento],
                   ["Valor", formatBRL(selected.valor)],
                   ["Status", STATUS_LABEL[selected.status] || selected.status],
-                  ["Cidade", selected.cidade],
+                  ["Cidade", selected.cidade || "-"],
                   ["Dispositivo", selected.device],
                   ["Navegador", selected.navegador],
                   ["Gerada em", formatDateTime(selected.created_at)],
@@ -187,10 +190,12 @@ export default function Faturas() {
                   </div>
                 ))}
               </dl>
-              <div className="rounded-xl border border-border/60 bg-background p-3">
-                <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">PIX Copia e Cola</p>
-                <p className="font-mono text-[10px] break-all text-emerald-600 dark:text-emerald-400">{gerarPixCopiaCola(selected)}</p>
-              </div>
+              {selected.pix_code && (
+                <div className="rounded-xl border border-border/60 bg-background p-3">
+                  <p className="text-[11px] font-semibold uppercase tracking-wider text-muted-foreground mb-1.5">PIX Copia e Cola</p>
+                  <p className="font-mono text-[10px] break-all text-emerald-600 dark:text-emerald-400">{selected.pix_code}</p>
+                </div>
+              )}
               <button
                 data-testid="fatura-detail-copy-pix"
                 onClick={() => copiarPix(selected)}

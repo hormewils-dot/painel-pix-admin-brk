@@ -1,32 +1,34 @@
-# PRD — Donas / BRK Painel Administrativo
+# PRD — BRK Faturas (Painel Admin + Site Público)
 
 ## Problema original (pt-BR)
-Painel administrativo **privado** (rota `/donaspainel`, login e senha) que registra e exibe as faturas geradas no site público (o site público será construído depois). Requisitos:
-1. Campo para adicionar **chave PIX** em Configurações.
-2. Campo para configurar **notificações no grupo do bot Telegram** em Configurações.
-3. **Dashboard**: faturas geradas, acessos ao site público, atividade em tempo real (acesso, PIX gerado, PIX copiado).
-4. **Aba de faturas geradas**.
-5. Rota `/donaspainel` com login (user: `donas`).
-Exigência de visual altamente profissional.
+Painel administrativo **privado** (rota `/donaspainel`) que registra e exibe faturas geradas no **site público**. Depois, construir o site público onde o visitante gera o PIX de verdade.
+Requisitos do painel: chave PIX, notificações Telegram, dashboard (faturas, acessos, atividade em tempo real), aba de faturas, login.
 
 ## Stack
-- Frontend: React 19 + Tailwind + shadcn/ui + recharts + sonner. Rota base `/donaspainel`.
+- Frontend: React 19 + Tailwind + shadcn/ui + recharts + sonner + qrcode.react. Rotas: `/` (público), `/donaspainel` (painel).
 - Backend: FastAPI + MongoDB (motor). Prefixo `/api`.
-- Auth: JWT custom (bcrypt), token no header `Authorization: Bearer`, armazenado em localStorage (`brk_token`).
+- Auth: JWT custom (bcrypt), token em localStorage (`brk_token`).
 
-## Implementado (17/11/2026)
-- **Auth**: login `/api/auth/login`, `/api/auth/me`, admin seedado do `.env` (user `donas`, email owner `hormewils@gmail.com`). Rotas de dados protegidas (401 sem token). ✅ testado
-- **Dashboard** (`/api/dashboard/overview`): 6 KPIs (pagamentos gerados, QR copiados, total pagamentos R$, PIX copiados R$, clicks home, clicks faturas), gráfico 7 dias, recentes, feed ao vivo (poll 2s). ✅
-- **Faturas** (`/api/faturas`): tabela com busca por documento, filtro por status (pago/pendente/expirado), modal de detalhe com QR + PIX copia-e-cola, botão copiar PIX com toast. ✅ testado
-- **Atividade em tempo real** (`/api/activities`): feed estilo terminal, poll 2s. ✅
-- **Configurações** (`GET/PUT /api/settings`): chave PIX (tipo, chave, beneficiário, cidade) + Telegram (token, chat id, switches de eventos) + botão de teste (`POST /api/settings/telegram/test`). ✅ testado (persistência + erro gracioso sem token Telegram)
-- **Simulador**: loop no backend gera faturas/atividades/cliques continuamente (substitui o site público enquanto ele não existe). MOCKED até o site público ser construído.
+## Implementado
+### 17/11/2026 — Painel Admin
+- Login JWT (user `donas`, owner `hormewils@gmail.com`), rotas protegidas. Tela de login redesenhada (imagem Leonardo, card centralizado, marca "BRK Faturas").
+- Dashboard: 6 KPIs, gráfico 7 dias, recentes, feed ao vivo (poll 2s).
+- Faturas: tabela com busca, filtro por status, modal com QR real + PIX copia-e-cola.
+- Atividade em tempo real.
+- Configurações: chave PIX, valores por cidade, Telegram (token/chat id/switches + teste).
+
+### 18/11/2026 — Site Público + PIX real
+- **Simulador aleatório REMOVIDO**. Faturas/atividades agora vêm só do site público. Dados fake antigos limpos.
+- **Site público** em `/`: visitante informa CPF + cidade -> consulta débito -> vê valor (por cidade) -> paga via **PIX real** (QR Code + copia-e-cola gerados da chave PIX, CRC16 válido).
+- Endpoints públicos: /public/info, /public/acesso, /public/consulta, /public/pix-copiado.
+- Eventos reais (pix_gerado, pix_copiado, acesso) alimentam o painel e disparam Telegram (se ativado).
+- **Validado via curl**: BR Code com CRC válido, valor por cidade, fatura no painel com pix_code, pix-copiado, CPF inválido rejeitado. UI pública validada via screenshot (QR + copia-e-cola).
 
 ## Pendente / Backlog
-- **P0**: Construir o **site público** que realmente gera as faturas e dispara os eventos/notificações reais (substituir o simulador).
-- **P1**: Notificações reais do Telegram disparadas nos eventos (hoje só há o botão de teste); exige token+chat id reais do usuário.
-- **P1**: Geração real de PIX copia-e-cola (BR Code EMV válido) + QR real a partir da chave PIX configurada.
-- **P2**: Exportar relatório CSV; paginação na tabela de faturas; marcar fatura como paga manualmente.
+- **P0**: Usuário vai enviar o DESIGN da página inicial pública para substituir a 1ª versão atual.
+- **P1**: Definir como a CIDADE do visitante é determinada (hoje ele seleciona; avaliar auto por IP).
+- **P1**: Confirmação automática de pagamento (requer gateway/PSP) — hoje PIX cai direto na conta da chave, sem baixa automática.
+- **P2**: Status "pago/expirado" automático; exportar CSV; paginação; marcar pago manualmente.
 
 ## Credenciais
 Ver `/app/memory/test_credentials.md`.
